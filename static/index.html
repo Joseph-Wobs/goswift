@@ -1,0 +1,507 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>QuikDocs</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Fonts - Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        /* Custom scrollbar for history */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f1f1;
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #888;
+            border-radius: 10px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 min-h-screen flex flex-col items-center py-8 px-4">
+    <h1 class="text-4xl font-bold text-blue-700 mb-8 rounded-lg p-3 bg-white shadow-md">QuikDocs</h1>
+
+    <!-- Message Display Area -->
+    <div id="message-container" class="w-full max-w-4xl mb-4"></div>
+
+    <!-- Main Content Area -->
+    <div id="app-root" class="w-full max-w-4xl bg-white p-8 rounded-lg shadow-md border border-gray-200">
+        <!-- Content will be rendered here by JavaScript -->
+        <div class="text-center text-gray-500">Loading application...</div>
+    </div>
+
+    <script>
+        const API_BASE_URL = window.location.origin; // API calls will go to the same origin as the HTML
+        const appRoot = document.getElementById('app-root');
+        const messageContainer = document.getElementById('message-container');
+
+        let currentToken = localStorage.getItem('quikdocs_token') || '';
+        let currentUserId = localStorage.getItem('quikdocs_user_id') || '';
+        let currentUsername = localStorage.getItem('quikdocs_username') || '';
+        let selectedDocument = null;
+        let sseEventSource = null; // To manage SSE connection
+
+        // --- Utility Functions ---
+
+        function showMessage(msg, type) {
+            messageContainer.innerHTML = `
+                <div class="p-3 mb-4 rounded-lg shadow-md ${type === 'success' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}">
+                    ${msg}
+                </div>
+            `;
+            setTimeout(() => {
+                messageContainer.innerHTML = '';
+            }, 5000);
+        }
+
+        function clearAuth() {
+            currentToken = '';
+            currentUserId = '';
+            currentUsername = '';
+            localStorage.removeItem('quikdocs_token');
+            localStorage.removeItem('quikdocs_user_id');
+            localStorage.removeItem('quikdocs_username');
+            selectedDocument = null;
+            if (sseEventSource) {
+                sseEventSource.close();
+                sseEventSource = null;
+            }
+            showMessage('Logged out successfully.', 'success');
+            renderAuthPage();
+        }
+
+        // --- API Helper Function ---
+        async function apiFetch(endpoint, options = {}) {
+            const headers = {
+                'Content-Type': 'application/json',
+                ...options.headers
+            };
+            if (currentToken) {
+                headers['Authorization'] = `Bearer ${currentToken}`;
+            }
+
+            const response = await fetch(`${API_BASE_URL}${endpoint}`, {
+                ...options,
+                headers: headers
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+                if (response.status === 401 || response.status === 403) {
+                    clearAuth(); // Clear token on unauthorized/forbidden
+                    showMessage('Session expired or unauthorized. Please log in again.', 'error');
+                }
+                throw new Error(errorData.error || `API Error: ${response.status} ${response.statusText}`);
+            }
+            return response.json();
+        }
+
+        // --- Render Pages ---
+
+        function renderAuthPage() {
+            appRoot.innerHTML = `
+                <div class="w-full max-w-md bg-white p-8 rounded-lg shadow-md border border-gray-200">
+                    <h2 class="text-2xl font-semibold text-gray-800 mb-6 text-center" id="auth-title">Login</h2>
+                    <form id="auth-form" class="space-y-4">
+                        <div>
+                            <label class="block text-gray-700 text-sm font-bold mb-2" for="username">Username:</label>
+                            <input type="text" id="username" class="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" required>
+                        </div>
+                        <div>
+                            <label class="block text-gray-700 text-sm font-bold mb-2" for="password">Password:</label>
+                            <input type="password" id="password" class="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 mb-3 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent" required>
+                        </div>
+                        <div id="confirm-password-group" class="hidden">
+                            <label class="block text-gray-700 text-sm font-bold mb-2" for="confirmPassword">Confirm Password:</label>
+                            <input type="password" id="confirmPassword" class="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700 mb-3 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                        </div>
+                        <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg focus:outline-none focus:shadow-outline transition duration-200 ease-in-out transform hover:scale-105">Login</button>
+                    </form>
+                    <div class="mt-6 text-center">
+                        <button id="toggle-auth-mode" class="text-blue-500 hover:text-blue-700 text-sm">Need an account? Sign Up</button>
+                    </div>
+                </div>
+            `;
+
+            let isLoginMode = true;
+            const authTitle = document.getElementById('auth-title');
+            const authForm = document.getElementById('auth-form');
+            const confirmPasswordGroup = document.getElementById('confirm-password-group');
+            const toggleAuthModeBtn = document.getElementById('toggle-auth-mode');
+
+            toggleAuthModeBtn.addEventListener('click', () => {
+                isLoginMode = !isLoginMode;
+                authTitle.textContent = isLoginMode ? 'Login' : 'Sign Up';
+                confirmPasswordGroup.classList.toggle('hidden', isLoginMode);
+                authForm.querySelector('button[type="submit"]').textContent = isLoginMode ? 'Login' : 'Sign Up';
+                toggleAuthModeBtn.textContent = isLoginMode ? 'Need an account? Sign Up' : 'Already have an account? Login';
+            });
+
+            authForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                const usernameInput = document.getElementById('username').value;
+                const passwordInput = document.getElementById('password').value;
+                const confirmPasswordInput = document.getElementById('confirmPassword').value;
+
+                if (!isLoginMode && passwordInput !== confirmPasswordInput) {
+                    showMessage('Passwords do not match!', 'error');
+                    return;
+                }
+
+                const endpoint = isLoginMode ? '/api/login' : '/api/signup';
+                const payload = { username: usernameInput, password: passwordInput };
+
+                try {
+                    const data = await apiFetch(endpoint, {
+                        method: 'POST',
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (isLoginMode) {
+                        currentToken = data.token;
+                        currentUserId = data.user_id;
+                        currentUsername = data.username;
+                        localStorage.setItem('quikdocs_token', currentToken);
+                        localStorage.setItem('quikdocs_user_id', currentUserId);
+                        localStorage.setItem('quikdocs_username', currentUsername);
+                        showMessage('Authentication successful!', 'success');
+                        renderDashboardPage();
+                    } else {
+                        showMessage('Registration successful! Please log in.', 'success');
+                        isLoginMode = true; // Switch to login after successful signup
+                        authTitle.textContent = 'Login';
+                        confirmPasswordGroup.classList.add('hidden');
+                        authForm.querySelector('button[type="submit"]').textContent = 'Login';
+                        toggleAuthModeBtn.textContent = 'Need an account? Sign Up';
+                    }
+                } catch (error) {
+                    console.error('Auth error:', error);
+                    showMessage(error.message, 'error');
+                }
+            });
+        }
+
+        async function renderDashboardPage() {
+            if (!currentToken) {
+                renderAuthPage();
+                return;
+            }
+
+            appRoot.innerHTML = `
+                <div class="w-full max-w-4xl bg-white p-8 rounded-lg shadow-md border border-gray-200">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-2xl font-semibold text-gray-800">Welcome, ${currentUsername}! Your Documents</h2>
+                        <button id="logout-btn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded-lg transition duration-200 ease-in-out transform hover:scale-105">Logout</button>
+                    </div>
+
+                    <div class="mb-6 p-4 border border-blue-200 rounded-lg bg-blue-50 flex flex-col sm:flex-row items-center space-y-3 sm:space-y-0 sm:space-x-4">
+                        <input type="text" id="new-doc-title" placeholder="New document title" class="flex-grow shadow appearance-none border rounded-lg w-full sm:w-auto py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                        <button id="create-doc-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg focus:outline-none focus:shadow-outline transition duration-200 ease-in-out transform hover:scale-105 w-full sm:w-auto">Create New Document</button>
+                    </div>
+
+                    <div id="documents-list">
+                        <p class="text-center text-gray-600">Loading documents...</p>
+                    </div>
+                </div>
+            `;
+
+            document.getElementById('logout-btn').addEventListener('click', clearAuth);
+            document.getElementById('create-doc-btn').addEventListener('click', createDocument);
+
+            await fetchAndRenderDocuments();
+        }
+
+        async function fetchAndRenderDocuments() {
+            const documentsListDiv = document.getElementById('documents-list');
+            documentsListDiv.innerHTML = '<p class="text-center text-gray-600">Loading documents...</p>';
+            try {
+                const docs = await apiFetch('/api/docs');
+                if (docs.length === 0) {
+                    documentsListDiv.innerHTML = '<p class="text-center text-gray-600">No documents yet. Create one above!</p>';
+                } else {
+                    documentsListDiv.innerHTML = `
+                        <ul class="space-y-3">
+                            ${docs.map(doc => `
+                                <li class="flex flex-col sm:flex-row items-start sm:items-center justify-between bg-gray-50 p-4 rounded-lg shadow-sm border border-gray-100 hover:shadow-md transition-shadow duration-200">
+                                    <div class="flex-grow mb-2 sm:mb-0">
+                                        <span class="text-lg font-medium text-gray-800 cursor-pointer hover:text-blue-600" data-doc-id="${doc.id}">${doc.title}</span>
+                                        <p class="text-sm text-gray-500">Last updated: ${new Date(doc.updated_at).toLocaleString()}</p>
+                                    </div>
+                                    <div class="flex space-x-2">
+                                        <button class="bg-green-500 hover:bg-green-600 text-white text-sm font-bold py-1 px-3 rounded-lg transition duration-200" data-action="open" data-doc-id="${doc.id}">Open</button>
+                                        <button class="bg-red-500 hover:bg-red-600 text-white text-sm font-bold py-1 px-3 rounded-lg transition duration-200" data-action="delete" data-doc-id="${doc.id}">Delete</button>
+                                    </div>
+                                </li>
+                            `).join('')}
+                        </ul>
+                    `;
+                    documentsListDiv.querySelectorAll('[data-action="open"]').forEach(btn => {
+                        btn.addEventListener('click', (e) => openDocument(e.target.dataset.docId));
+                    });
+                    documentsListDiv.querySelectorAll('[data-action="delete"]').forEach(btn => {
+                        btn.addEventListener('click', (e) => deleteDocument(e.target.dataset.docId));
+                    });
+                    documentsListDiv.querySelectorAll('span[data-doc-id]').forEach(span => {
+                        span.addEventListener('click', (e) => openDocument(e.target.dataset.docId));
+                    });
+                }
+            } catch (error) {
+                console.error('Error fetching documents:', error);
+                showMessage(error.message, 'error');
+                documentsListDiv.innerHTML = '<p class="text-center text-red-600">Failed to load documents.</p>';
+            }
+        }
+
+        async function createDocument() {
+            const newDocTitleInput = document.getElementById('new-doc-title');
+            const title = newDocTitleInput.value.trim();
+            if (!title) {
+                showMessage('Document title cannot be empty.', 'error');
+                return;
+            }
+            try {
+                const newDoc = await apiFetch('/api/docs', {
+                    method: 'POST',
+                    body: JSON.stringify({ title: title, content: '' })
+                });
+                showMessage('Document created successfully!', 'success');
+                newDocTitleInput.value = '';
+                await openDocument(newDoc.id); // Open the new document immediately
+            } catch (error) {
+                console.error('Error creating document:', error);
+                showMessage(error.message, 'error');
+            }
+        }
+
+        async function openDocument(docId) {
+            try {
+                selectedDocument = await apiFetch(`/api/docs/${docId}`);
+                renderDocumentPage();
+                startSSEConnection(docId); // Start SSE for real-time updates
+            } catch (error) {
+                console.error('Error opening document:', error);
+                showMessage(error.message, 'error');
+                renderDashboardPage(); // Go back to dashboard if document cannot be opened
+            }
+        }
+
+        async function deleteDocument(docId) {
+            if (!confirm('Are you sure you want to delete this document?')) { // Using confirm for simplicity, replace with custom modal if needed
+                return;
+            }
+            try {
+                await apiFetch(`/api/docs/${docId}`, { method: 'DELETE' });
+                showMessage('Document deleted successfully!', 'success');
+                selectedDocument = null; // Clear selected document
+                renderDashboardPage();
+            } catch (error) {
+                console.error('Error deleting document:', error);
+                showMessage(error.message, 'error');
+            }
+        }
+
+        async function renderDocumentPage() {
+            if (!selectedDocument) {
+                renderDashboardPage();
+                return;
+            }
+
+            appRoot.innerHTML = `
+                <div class="w-full max-w-4xl bg-white p-8 rounded-lg shadow-md border border-gray-200">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-2xl font-semibold text-gray-800">${selectedDocument.title}</h2>
+                        <button id="back-to-dashboard-btn" class="bg-gray-500 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg transition duration-200 ease-in-out transform hover:scale-105">Back to Dashboard</button>
+                    </div>
+
+                    <textarea id="doc-content-textarea" class="w-full h-80 p-4 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-800 text-base resize-y" placeholder="Start writing your document here..."></textarea>
+                    <div class="mt-4 flex flex-col sm:flex-row justify-between items-center space-y-3 sm:space-y-0 sm:space-x-4">
+                        <button id="save-doc-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg focus:outline-none focus:shadow-outline transition duration-200 ease-in-out transform hover:scale-105 w-full sm:w-auto">Save Document</button>
+                        <button id="toggle-history-btn" class="bg-purple-600 hover:bg-purple-700 text-white font-bold py-2 px-4 rounded-lg focus:outline-none focus:shadow-outline transition duration-200 ease-in-out transform hover:scale-105 w-full sm:w-auto">Show History (0)</button>
+                        <button id="generate-share-link-btn" class="bg-yellow-500 hover:bg-yellow-600 text-white font-bold py-2 px-4 rounded-lg focus:outline-none focus:shadow-outline transition duration-200 ease-in-out transform hover:scale-105 w-full sm:w-auto">Generate Share Link</button>
+                    </div>
+
+                    <div id="share-link-display" class="mt-6 p-4 bg-yellow-100 border border-yellow-300 rounded-lg text-yellow-800 text-center hidden">
+                        <p class="font-semibold mb-2">Shareable Link:</p>
+                        <a id="share-link-url" href="#" target="_blank" rel="noopener noreferrer" class="text-blue-600 hover:underline break-all"></a>
+                        <button id="copy-share-link-btn" class="ml-2 bg-yellow-600 hover:bg-yellow-700 text-white text-xs font-bold py-1 px-2 rounded-lg transition duration-200">Copy</button>
+                    </div>
+
+                    <div id="history-display" class="mt-6 border border-gray-300 rounded-lg p-4 bg-gray-50 hidden">
+                        <h3 class="text-xl font-semibold text-gray-800 mb-4">Version History</h3>
+                        <ul id="versions-list" class="space-y-3 max-h-60 overflow-y-auto pr-2 custom-scrollbar">
+                            <p class="text-gray-600">No versions recorded yet.</p>
+                        </ul>
+                    </div>
+                </div>
+            `;
+
+            const docContentTextarea = document.getElementById('doc-content-textarea');
+            const saveDocBtn = document.getElementById('save-doc-btn');
+            const toggleHistoryBtn = document.getElementById('toggle-history-btn');
+            const generateShareLinkBtn = document.getElementById('generate-share-link-btn');
+            const backToDashboardBtn = document.getElementById('back-to-dashboard-btn');
+            const shareLinkDisplay = document.getElementById('share-link-display');
+            const shareLinkUrl = document.getElementById('share-link-url');
+            const copyShareLinkBtn = document.getElementById('copy-share-link-btn');
+            const historyDisplay = document.getElementById('history-display');
+            const versionsList = document.getElementById('versions-list'); // Get reference here
+
+            docContentTextarea.value = selectedDocument.content;
+
+            saveDocBtn.addEventListener('click', async () => {
+                const newContent = docContentTextarea.value;
+                try {
+                    const updatedDoc = await apiFetch(`/api/docs/${selectedDocument.id}`, {
+                        method: 'PUT',
+                        body: JSON.stringify({ content: newContent })
+                    });
+                    selectedDocument = updatedDoc; // Update local state with new doc
+                    showMessage('Document saved!', 'success');
+                    await fetchAndRenderHistory(selectedDocument.id, versionsList, toggleHistoryBtn); // Pass elements
+                } catch (error) {
+                    console.error('Error saving document:', error);
+                    showMessage(error.message, 'error');
+                }
+            });
+
+            backToDashboardBtn.addEventListener('click', () => {
+                selectedDocument = null;
+                if (sseEventSource) {
+                    sseEventSource.close();
+                    sseEventSource = null;
+                }
+                renderDashboardPage();
+            });
+
+            let showHistory = false;
+            toggleHistoryBtn.addEventListener('click', async () => {
+                showHistory = !showHistory;
+                historyDisplay.classList.toggle('hidden', !showHistory);
+                toggleHistoryBtn.textContent = showHistory ? 'Hide History' : `Show History (${selectedDocument.versions.length})`;
+                if (showHistory) {
+                    await fetchAndRenderHistory(selectedDocument.id, versionsList, toggleHistoryBtn); // Pass elements
+                }
+            });
+
+            generateShareLinkBtn.addEventListener('click', async () => {
+                try {
+                    const data = await apiFetch(`/api/docs/${selectedDocument.id}/share`, { method: 'POST' });
+                    const fullShareLink = `${API_BASE_URL}${data.share_link}`;
+                    shareLinkUrl.href = fullShareLink;
+                    shareLinkUrl.textContent = fullShareLink;
+                    shareLinkDisplay.classList.remove('hidden');
+                    showMessage('Share link generated!', 'success');
+                } catch (error) {
+                    console.error('Error generating share link:', error);
+                    showMessage(error.message, 'error');
+                }
+            });
+
+            copyShareLinkBtn.addEventListener('click', () => {
+                const el = document.createElement('textarea');
+                el.value = shareLinkUrl.textContent;
+                document.body.appendChild(el);
+                el.select();
+                document.execCommand('copy');
+                document.body.removeChild(el);
+                showMessage('Link copied to clipboard!', 'success');
+            });
+
+            // Initial render of history and update button text
+            await fetchAndRenderHistory(selectedDocument.id, versionsList, toggleHistoryBtn); // Pass elements
+            // The text content is now updated inside fetchAndRenderHistory
+            // toggleHistoryBtn.textContent = `Show History (${selectedDocument.versions.length})`;
+
+            // Listen for real-time updates from SSE
+            function startSSEConnection(docId) {
+                if (sseEventSource) {
+                    sseEventSource.close(); // Close existing connection if any
+                }
+                sseEventSource = new EventSource(`${API_BASE_URL}/api/docs/${docId}/subscribe`);
+
+                sseEventSource.onmessage = (event) => {
+                    console.log('SSE message received:', event.data);
+                    try {
+                        // Assuming the SSE message is the new content
+                        docContentTextarea.value = event.data; // Update textarea directly
+                        showMessage('Document updated in real-time!', 'success');
+                        // Optionally, refetch history to show new version
+                        fetchAndRenderHistory(docId, versionsList, toggleHistoryBtn); // Pass elements
+                    } catch (e) {
+                        console.error('Error parsing SSE message:', e);
+                    }
+                };
+
+                sseEventSource.onerror = (error) => {
+                    console.error('SSE Error:', error);
+                    sseEventSource.close();
+                    sseEventSource = null;
+                    showMessage('Real-time connection lost. Please refresh.', 'error');
+                };
+            }
+        }
+
+        async function fetchAndRenderHistory(docId, versionsListElement, toggleHistoryBtnElement) {
+            console.log("Attempting to fetch and render history for docId:", docId);
+
+            if (!versionsListElement) {
+                console.error("CRITICAL ERROR: 'versionsListElement' was not provided or is null.");
+                showMessage("Failed to load history: UI element missing.", "error");
+                return; // Exit if the element is not found
+            }
+
+            try {
+                const versions = await apiFetch(`/api/docs/${docId}/history`);
+                selectedDocument.versions = versions; // Update versions in selectedDocument
+
+                if (versions.length === 0) {
+                    versionsListElement.innerHTML = '<p class="text-gray-600">No versions recorded yet.</p>';
+                } else {
+                    versionsListElement.innerHTML = versions.map((version, index) => `
+                        <li class="p-3 bg-white rounded-lg shadow-sm border border-gray-100">
+                            <p class="text-sm font-medium text-gray-700">
+                                Version ${index + 1} - ${new Date(version.timestamp).toLocaleString()}
+                            </p>
+                            <pre class="text-xs text-gray-600 whitespace-pre-wrap bg-gray-100 p-2 rounded-md mt-1 max-h-24 overflow-auto">${version.content}</pre>
+                        </li>
+                    `).join('');
+                }
+
+                if (toggleHistoryBtnElement) { // Ensure button exists before updating text
+                    toggleHistoryBtnElement.textContent = `Show History (${versions.length})`;
+                }
+                console.log("History fetched and rendered successfully.");
+            } catch (error) {
+                console.error('Error fetching history:', error);
+                showMessage(error.message, 'error');
+                if (versionsListElement) { // Only attempt to update if element exists
+                    versionsListElement.innerHTML = '<p class="text-center text-red-600">Failed to load history.</p>'; // Provide feedback
+                }
+            }
+        }
+
+
+        // --- Initial Load ---
+        document.addEventListener('DOMContentLoaded', () => {
+            if (currentToken) {
+                renderDashboardPage();
+            } else {
+                renderAuthPage();
+            }
+        });
+    </script>
+</body>
+</html>

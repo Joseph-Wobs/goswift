@@ -1,0 +1,33 @@
+# quikdocs/backend/render.yaml
+# This file tells Render how to build and deploy your Go application.
+
+services:
+  - type: web
+    name: quikdocs-backend # A unique name for your service on Render
+    env: go
+    # The root directory of your Go application relative to your Git repository root.
+    # Assuming your repo structure is:
+    # myproject/
+    # └── quikdocs/
+    #     └── backend/  <- This is your `main.go` directory
+    rootDir: quikdocs/backend
+
+    # Build command:
+    # `go mod tidy` ensures all dependencies are correctly fetched.
+    # `go build -o quikdocs .` compiles your Go application into an executable named 'quikdocs'.
+    buildCommand: go mod tidy && go build -o quikdocs .
+
+    # Start command:
+    # `./quikdocs` runs the compiled executable.
+    startCommand: ./quikdocs
+
+    # Environment variables for your application.
+    # Render automatically injects the PORT environment variable.
+    # Your Go app already uses `os.Getenv("PORT")`, so no explicit PORT here.
+    envVars:
+      - key: GO_ENV # You can use this if you had different logic for dev/prod in Go (not strictly needed now)
+        value: production
+      # Add any other environment variables your application needs here.
+      # For example, if you later add a database connection string:
+      # - key: DATABASE_URL
+      #   value: postgres://user:password@host:port/database
